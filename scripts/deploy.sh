@@ -10,7 +10,8 @@
 # Usage: ./deploy.sh <COMMIT_HASH>
 # ==============================================================================
 
-# Exit immediately if a command exits with a non-zero status.
+# For running inside a container or a controlled environment, ensure the PATH includes necessary binaries.
+export PATH=$PATH:/usr/local/bin:/usr/bin
 set -e
 
 # --- Configuration ---
