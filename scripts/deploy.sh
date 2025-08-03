@@ -14,16 +14,6 @@
 export PATH=$PATH:/usr/local/bin:/usr/bin
 set -e
 
-# --- Configuration ---
-# Load environment variables from the config file
-CONFIG_PATH="$(dirname "$0")/../config/.env"
-if [ -f "$CONFIG_PATH" ]; then
-    export $(grep -v '^#' "$CONFIG_PATH" | xargs)
-else
-    echo "🚨 ERROR: Configuration file not found at $CONFIG_PATH"
-    exit 1
-fi
-
 # --- Script Variables ---
 NEW_COMMIT_HASH=$1
 if [ -z "$NEW_COMMIT_HASH" ]; then
