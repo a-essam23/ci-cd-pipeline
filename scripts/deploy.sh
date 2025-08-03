@@ -1,30 +1,15 @@
 #!/bin/bash
 
 # ==============================================================================
-# Self-Hosted CI/CD Deployment Script
+# Self-Hosted CI/CD Deployment Script (Host Runner Version)
 #
-# This script automates the deployment of a Dockerized application to a
-# local Kubernetes cluster, featuring zero-downtime rolling updates and
-# automatic rollbacks on failure.
-#
-# Usage: ./deploy.sh <COMMIT_HASH>
+# Executes directly on the host machine. Expects git, docker, and kubectl
+# to be in the system's PATH. Environment variables are inherited from the
+# calling process (pm2 > node > this script).
 # ==============================================================================
 
-# For running inside a container or a controlled environment, ensure the PATH includes necessary binaries.
-export PATH=$PATH:/usr/local/bin:/usr/bin
+# Exit immediately if any command fails
 set -e
-
-# --- Script Variables ---
-NEW_COMMIT_HASH=$1
-if [ -z "$NEW_COMMIT_HASH" ]; then
-    echo "🚨 ERROR: No commit hash provided. Usage: ./deploy.sh <COMMIT_HASH>"
-    exit 1
-fi
-
-# Docker image names
-COMMIT_IMAGE="${REGISTRY_URL}/${APP_NAME}:${NEW_COMMIT_HASH}"
-LATEST_IMAGE="${REGISTRY_URL}/${APP_NAME}:latest"
-STABLE_IMAGE="${REGISTRY_URL}/${APP_NAME}:last-stable"
 
 # --- Helper Functions ---
 log() {
@@ -35,6 +20,37 @@ log_error() {
     echo "[$(date +'%Y-%m-%d %H:%M:%S')] - ERROR - $1" >&2
 }
 
+# --- SSH Agent Setup (Optional) ---
+# If an SSH key is specified, load it for private git repo access.
+if [ -n "$SSH_KEY_NAME" ]; then
+    log "SSH_KEY_NAME is set. Initializing SSH Agent and adding key: ${SSH_KEY_NAME}"
+    eval "$(ssh-agent -s)" > /dev/null
+    
+    # Assumes the user running the pm2 process has the key.
+    # If pm2 is run by root, it will look in /root/.ssh/
+    SSH_KEY_PATH="/root/.ssh/${SSH_KEY_NAME}"
+    if [ -f "$SSH_KEY_PATH" ]; then
+        ssh-add "$SSH_KEY_PATH" > /dev/null
+        log "Successfully added SSH key."
+    else
+        log_error "SSH key specified (${SSH_KEY_NAME}) but not found at ${SSH_KEY_PATH}. Aborting."
+        exit 1
+    fi
+else
+    log "No SSH_KEY_NAME specified. Proceeding with default (HTTPS) git authentication."
+fi
+
+# --- Script Variables ---
+NEW_COMMIT_HASH=$1
+if [ -z "$NEW_COMMIT_HASH" ]; then
+    log_error "No commit hash provided."
+    exit 1
+fi
+
+COMMIT_IMAGE="${REGISTRY_URL}/${APP_NAME}:${NEW_COMMIT_HASH}"
+LATEST_IMAGE="${REGISTRY_URL}/${APP_NAME}:latest"
+STABLE_IMAGE="${REGISTRY_URL}/${APP_NAME}:last-stable"
+
 # --- Deployment Steps ---
 
 log "Starting deployment for commit ${NEW_COMMIT_HASH}..."
@@ -43,29 +59,33 @@ log "Starting deployment for commit ${NEW_COMMIT_HASH}..."
 log "Navigating to app repository: ${APP_REPO_PATH}"
 cd "$APP_REPO_PATH" || { log_error "Application repository not found!"; exit 1; }
 
+log "Marking repository as safe for git operations..."
+git config --global --add safe.directory "$APP_REPO_PATH"
+
 log "Pulling latest changes from main branch..."
 git pull origin main
 
 # 2. Backup Current Running Image
 log "Backing up current ':latest' image to ':last-stable'..."
-CURRENT_LATEST_ID=$(docker images -q "$LATEST_IMAGE")
-if [ -n "$CURRENT_LATEST_ID" ]; then
+if docker image inspect "$LATEST_IMAGE" > /dev/null 2>&1; then
     docker tag "$LATEST_IMAGE" "$STABLE_IMAGE"
-    log "Successfully tagged current image ${CURRENT_LATEST_ID} as ':last-stable'."
+    log "Successfully tagged current image as ':last-stable'."
 else
     log "No existing ':latest' image found to back up. Skipping."
 fi
 
-# 3. Build New Docker Image with Resource Limits
+# 3. Build New Docker Image
 log "Building new Docker image: ${COMMIT_IMAGE}"
-# Limit build resources to avoid overwhelming the VPS. Adjust as needed.
-# --memory="1536m" is 1.5GB. --cpus="1.5" allows up to 1.5 CPU cores.
-# NODE_OPTIONS limits memory for the Node.js build process itself.
-if docker build \
-    --build-arg NODE_OPTIONS="--max-old-space-size=1024" \
-    --memory="1536m" \
-    --cpus="1.5" \
-    -t "$COMMIT_IMAGE" . ; then
+# NOTE: Removed --memory and --cpus flags as they are invalid for 'docker build'.
+# The NODE_OPTIONS build-arg is still useful to limit memory for the build process itself.
+if docker run --rm \
+  --cpus="0.75" \
+  --memory="1536m" \
+  -v /var/run/docker.sock:/var/run/docker.sock \
+  -v "$(pwd)":/app \
+  -w /app \
+  docker:25.0 \
+  sh -c 'DOCKER_BUILDKIT=1 docker build --build-arg NODE_OPTIONS="--max-old-space-size=1024" -t '"$COMMIT_IMAGE"' .' ; then
     log "✅ Docker image built successfully."
 else
     log_error "🚨 Docker build failed. Aborting deployment."
@@ -78,19 +98,8 @@ docker tag "$COMMIT_IMAGE" "$LATEST_IMAGE"
 
 log "Pushing images to local registry at ${REGISTRY_URL}..."
 docker push "$LATEST_IMAGE"
-if [ -n "$CURRENT_LATEST_ID" ]; then
+if docker image inspect "$STABLE_IMAGE" > /dev/null 2>&1; then
     docker push "$STABLE_IMAGE"
-fi
-
-log "Verifying that the new image exists in the local registry..."
-# The 'docker image inspect' command will exit with a non-zero status code if the image doesn't exist.
-# The >/dev/null 2>&1 part silences the output, we only care about the success/failure.
-if docker image inspect "$COMMIT_IMAGE" >/dev/null 2>&1; then
-    log "✅ Image ${COMMIT_IMAGE} verified."
-else
-    log_error "🚨 CRITICAL FAILURE: Newly built image was not found in the local registry. Aborting deployment."
-    # At this point, we could also trigger a rollback or alert.
-    exit 1
 fi
 
 # 5. Trigger Kubernetes Rolling Update
