@@ -2,7 +2,7 @@
 const express = require('express');
 const crypto = require('crypto');
 const { spawn } = require('child_process');
-// const bodyParser = require('');
+const bodyParser = require('body-parser');
 const path = require('path');
 require('dotenv').config({ path: path.resolve(__dirname, '../config/.env') });
 
@@ -33,7 +33,7 @@ const verifySignature = (req, res, next) => {
   next();
 };
 
-app.use(express.json({ verify: (req, res, buf) => { req.body = buf; } }));
+app.use(bodyParser.raw({ type: 'application/json' }));
 
 app.post('/webhook/git-update', verifySignature, (req, res) => {
   try {

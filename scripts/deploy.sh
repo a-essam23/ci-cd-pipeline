@@ -92,6 +92,17 @@ if [ -n "$CURRENT_LATEST_ID" ]; then
     docker push "$STABLE_IMAGE"
 fi
 
+log "Verifying that the new image exists in the local registry..."
+# The 'docker image inspect' command will exit with a non-zero status code if the image doesn't exist.
+# The >/dev/null 2>&1 part silences the output, we only care about the success/failure.
+if docker image inspect "$COMMIT_IMAGE" >/dev/null 2>&1; then
+    log "✅ Image ${COMMIT_IMAGE} verified."
+else
+    log_error "🚨 CRITICAL FAILURE: Newly built image was not found in the local registry. Aborting deployment."
+    # At this point, we could also trigger a rollback or alert.
+    exit 1
+fi
+
 # 5. Trigger Kubernetes Rolling Update
 log "Updating Kubernetes deployment '${APP_NAME}' to use new image..."
 kubectl set image deployment/"${APP_NAME}" "${APP_NAME}"="${COMMIT_IMAGE}" -n "${K8S_NAMESPACE}"
